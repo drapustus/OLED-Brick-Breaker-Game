@@ -1,0 +1,11 @@
+OLED Display
+GND->GND
+VCC->3.3V
+SCL->A5
+SDA->A4
+Joystick
+GND->GND
+5V->5V
+VRx->A0
+VRy->A1
+SW-> D2
