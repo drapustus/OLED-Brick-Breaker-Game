@@ -1,0 +1,335 @@
+/*
+ * Arduino Brick Breaker Game
+ * Made By M Farhan Sadique Fareshi
+ */
+
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+// DISPLAY
+#define SCREEN_WIDTH  128
+#define SCREEN_HEIGHT  64
+#define OLED_RESET     -1
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+
+// Joystick pins
+#define JOY_X   A0
+#define JOY_Y   A1
+#define JOY_BTN  2
+
+// Game area (leave top 8 px for HUD)
+#define PLAY_TOP    9
+#define PLAY_BOTTOM SCREEN_HEIGHT   // 64
+#define PLAY_LEFT   0
+#define PLAY_RIGHT  SCREEN_WIDTH    // 128
+
+// Paddle
+#define PAD_W     24
+#define PAD_H      3
+#define PAD_Y     (PLAY_BOTTOM - PAD_H - 2)
+#define PAD_SPEED  3
+
+// Ball
+#define BALL_R    2
+
+// Bricks
+#define BRICK_COLS  8
+#define BRICK_ROWS  4
+#define BRICK_W    14
+#define BRICK_H     5
+#define BRICK_PAD_X 2
+#define BRICK_PAD_Y 2
+#define BRICK_START_Y (PLAY_TOP + 4)
+
+//Lives
+#define MAX_LIVES 3
+// Game state
+int  padX;
+float ballX, ballY;
+float ballDX, ballDY;
+int  score;
+int  lives;
+bool bricks[BRICK_ROWS][BRICK_COLS];
+int  bricksLeft;
+bool gameOver;
+bool gameWon;
+bool waitLaunch; 
+
+void setup() {
+  Serial.begin(9600);
+  pinMode(JOY_BTN, INPUT_PULLUP);
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println(F("SSD1306 not found"));
+    for (;;);
+  }
+
+  showTitle();
+  initGame();
+}
+
+void loop() {
+  if (gameOver || gameWon) {
+    // Wait for button press to restart
+    if (digitalRead(JOY_BTN) == LOW) {
+      delay(200);
+      initGame();
+    }
+    return;
+  }
+
+  readJoystick();
+
+  if (waitLaunch) {
+    ballX = padX + PAD_W / 2.0;
+    ballY = PAD_Y - BALL_R - 1;
+    if (digitalRead(JOY_BTN) == LOW) {
+      waitLaunch = false;
+      ballDX = 1.8;
+      ballDY = -2.0;
+      delay(150);
+    }
+  } else {
+    updateBall();
+  }
+
+  drawFrame();
+  delay(18);   // ~55 fps
+}
+
+void initGame() {
+  score      = 0;
+  lives      = MAX_LIVES;
+  gameOver   = false;
+  gameWon    = false;
+  waitLaunch = true;
+  padX       = (SCREEN_WIDTH - PAD_W) / 2;
+
+  resetBricks();
+}
+
+void resetBricks() {
+  bricksLeft = 0;
+  for (int r = 0; r < BRICK_ROWS; r++)
+    for (int c = 0; c < BRICK_COLS; c++) {
+      bricks[r][c] = true;
+      bricksLeft++;
+    }
+  waitLaunch = true;
+  ballX = padX + PAD_W / 2.0;
+  ballY = PAD_Y - BALL_R - 1;
+}
+
+void readJoystick() {
+  int jx = analogRead(JOY_X); 
+  int dead = 100;
+
+  if (jx < 512 - dead) {
+    int speed = map(512 - jx, dead, 512, 1, PAD_SPEED + 2);
+    padX -= speed;
+  } else if (jx > 512 + dead) {
+    int speed = map(jx - 512, dead, 512, 1, PAD_SPEED + 2);
+    padX += speed;
+  }
+  padX = constrain(padX, PLAY_LEFT, PLAY_RIGHT - PAD_W);
+}
+
+// Ball
+void updateBall() {
+  ballX += ballDX;
+  ballY += ballDY;
+
+  // Wall collisions
+  if (ballX - BALL_R <= PLAY_LEFT) {
+    ballX = PLAY_LEFT + BALL_R;
+    ballDX = fabs(ballDX);
+  }
+  if (ballX + BALL_R >= PLAY_RIGHT) {
+    ballX = PLAY_RIGHT - BALL_R;
+    ballDX = -fabs(ballDX);
+  }
+  if (ballY - BALL_R <= PLAY_TOP) {
+    ballY = PLAY_TOP + BALL_R;
+    ballDY = fabs(ballDY);
+  }
+
+  // Bottom – lose a life
+  if (ballY - BALL_R > PLAY_BOTTOM) {
+    lives--;
+    if (lives <= 0) {
+      gameOver = true;
+      drawGameOver();
+      return;
+    }
+    waitLaunch = true;
+    return;
+  }
+
+  // Paddle collision
+  if (ballY + BALL_R >= PAD_Y &&
+      ballY + BALL_R <= PAD_Y + PAD_H + 2 &&
+      ballX >= padX - BALL_R &&
+      ballX <= padX + PAD_W + BALL_R) {
+    ballDY = -fabs(ballDY);
+    ballY  = PAD_Y - BALL_R - 1;
+    // Add slight angle based on hit position
+    float rel = (ballX - (padX + PAD_W / 2.0)) / (PAD_W / 2.0);
+    ballDX = rel * 3.0;
+    if (fabs(ballDX) < 0.5) ballDX = (ballDX >= 0) ? 0.5 : -0.5;
+  }
+
+  // Brick collisions
+  checkBrickCollision();
+}
+
+void checkBrickCollision() {
+  for (int r = 0; r < BRICK_ROWS; r++) {
+    for (int c = 0; c < BRICK_COLS; c++) {
+      if (!bricks[r][c]) continue;
+
+      int bx = PLAY_LEFT + c * (BRICK_W + BRICK_PAD_X) + BRICK_PAD_X;
+      int by = BRICK_START_Y + r * (BRICK_H + BRICK_PAD_Y);
+
+      if (ballX + BALL_R > bx && ballX - BALL_R < bx + BRICK_W &&
+          ballY + BALL_R > by && ballY - BALL_R < by + BRICK_H) {
+
+        bricks[r][c] = false;
+        bricksLeft--;
+        score += 10;
+
+        // Determine bounce direction
+        float overlapL = (ballX + BALL_R) - bx;
+        float overlapR = (bx + BRICK_W) - (ballX - BALL_R);
+        float overlapT = (ballY + BALL_R) - by;
+        float overlapB = (by + BRICK_H) - (ballY - BALL_R);
+
+        float minH = min(overlapL, overlapR);
+        float minV = min(overlapT, overlapB);
+
+        if (minH < minV) ballDX = -ballDX;
+        else             ballDY = -ballDY;
+
+        if (bricksLeft == 0) {
+          gameWon = true;
+          drawWin();
+          return;
+        }
+        return;
+      }
+    }
+  }
+}
+
+// ─── Rendering ─────────────────────────────────────────────────────────────
+void drawFrame() {
+  display.clearDisplay();
+  drawHUD();
+  drawBricks();
+  drawPaddle();
+  drawBall();
+  display.display();
+}
+
+void drawHUD() {
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+
+  // Score on left
+  display.setCursor(0, 0);
+  display.print(F("S:"));
+  display.print(score);
+
+  // Lives on right  (shown as heart symbols or "Lives: N")
+  String livesStr = "Lives:";
+  livesStr += lives;
+  int16_t x1, y1;
+  uint16_t w, h;
+  display.getTextBounds(livesStr, 0, 0, &x1, &y1, &w, &h);
+  display.setCursor(SCREEN_WIDTH - w, 0);
+  display.print(livesStr);
+
+  // Dividing line
+  display.drawLine(0, 8, SCREEN_WIDTH - 1, 8, SSD1306_WHITE);
+}
+
+void drawBricks() {
+  for (int r = 0; r < BRICK_ROWS; r++) {
+    for (int c = 0; c < BRICK_COLS; c++) {
+      if (!bricks[r][c]) continue;
+      int bx = PLAY_LEFT + c * (BRICK_W + BRICK_PAD_X) + BRICK_PAD_X;
+      int by = BRICK_START_Y + r * (BRICK_H + BRICK_PAD_Y);
+      display.fillRect(bx, by, BRICK_W, BRICK_H, SSD1306_WHITE);
+      // Inner highlight line for 3D look
+      display.drawLine(bx + 1, by + 1, bx + BRICK_W - 2, by + 1, SSD1306_BLACK);
+    }
+  }
+}
+
+void drawPaddle() {
+  display.fillRoundRect(padX, PAD_Y, PAD_W, PAD_H, 1, SSD1306_WHITE);
+}
+
+void drawBall() {
+  display.fillCircle((int)ballX, (int)ballY, BALL_R, SSD1306_WHITE);
+}
+
+// ─── Screens ───────────────────────────────────────────────────────────────
+void showTitle() {
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+
+  display.setTextSize(2);
+  display.setCursor(10, 8);
+  display.print(F("BRICK"));
+  display.setCursor(10, 26);
+  display.print(F("BREAKER"));
+
+  display.setTextSize(1);
+  display.setCursor(20, 48);
+  display.print(F("Press BTN to start"));
+
+  display.display();
+
+  // Wait for button press
+  while (digitalRead(JOY_BTN) == HIGH) delay(50);
+  delay(200);
+}
+
+void drawGameOver() {
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+
+  display.setTextSize(2);
+  display.setCursor(8, 10);
+  display.print(F("GAME"));
+  display.setCursor(8, 28);
+  display.print(F("OVER"));
+
+  display.setTextSize(1);
+  display.setCursor(0, 50);
+  display.print(F("Score: "));
+  display.print(score);
+  display.print(F("  BTN:retry"));
+
+  display.display();
+}
+
+void drawWin() {
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+
+  display.setTextSize(2);
+  display.setCursor(14, 10);
+  display.print(F("YOU"));
+  display.setCursor(14, 28);
+  display.print(F("WIN!"));
+
+  display.setTextSize(1);
+  display.setCursor(0, 50);
+  display.print(F("Score: "));
+  display.print(score);
+  display.print(F("  BTN:retry"));
+
+  display.display();
+}
